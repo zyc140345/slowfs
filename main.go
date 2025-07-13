@@ -17,8 +17,8 @@ package main
 import (
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
+	"os"
 	"path/filepath"
 	"slowfs/slowfs"
 	"slowfs/slowfs/fuselayer"
@@ -26,8 +26,8 @@ import (
 	"slowfs/slowfs/units"
 	"time"
 
-	"github.com/hanwen/go-fuse/fuse/nodefs"
-	"github.com/hanwen/go-fuse/fuse/pathfs"
+	"github.com/hanwen/go-fuse/v2/fuse/nodefs"
+	"github.com/hanwen/go-fuse/v2/fuse/pathfs"
 )
 
 func main() {
@@ -76,7 +76,7 @@ func main() {
 	}
 
 	if *configFile != "" {
-		data, err := ioutil.ReadFile(*configFile)
+		data, err := os.ReadFile(*configFile)
 		if err != nil {
 			log.Fatalf("couldn't read config file %s: %s", *configFile, err)
 		}
