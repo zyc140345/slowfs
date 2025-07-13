@@ -24,11 +24,22 @@ import (
 	"slowfs/slowfs/fuselayer"
 	"slowfs/slowfs/scheduler"
 	"slowfs/slowfs/units"
+	"syscall"
 	"time"
 
+	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/hanwen/go-fuse/v2/fuse/nodefs"
 	"github.com/hanwen/go-fuse/v2/fuse/pathfs"
 )
+
+// getDirectoryOwner returns the uid and gid of the given directory
+func getDirectoryOwner(dirPath string) (uint32, uint32, error) {
+	var stat syscall.Stat_t
+	if err := syscall.Stat(dirPath, &stat); err != nil {
+		return 0, 0, fmt.Errorf("failed to stat directory %s: %v", dirPath, err)
+	}
+	return stat.Uid, stat.Gid, nil
+}
 
 func main() {
 	configs := map[string]*slowfs.DeviceConfig{
@@ -182,12 +193,32 @@ func main() {
 	}
 
 	fmt.Printf("using config: %s\n", config)
+	
+	// Get the owner of the backing directory
+	uid, gid, err := getDirectoryOwner(*backingDir)
+	if err != nil {
+		log.Fatalf("failed to get backing directory owner: %v", err)
+	}
+	fmt.Printf("Detected backing directory owner: uid=%d, gid=%d\n", uid, gid)
+	
 	scheduler := scheduler.New(config)
-	fs := pathfs.NewPathNodeFs(fuselayer.NewSlowFs(*backingDir, scheduler), nil)
-	server, _, err := nodefs.MountRoot(*mountDir, fs.Root(), nil)
+	fs := pathfs.NewPathNodeFs(fuselayer.NewSlowFsWithOwner(*backingDir, scheduler, uid, gid), nil)
+	
+	// Create mount options with proper uid/gid mapping
+	mountOpts := &fuse.MountOptions{
+		AllowOther: true,
+		Options: []string{
+			"default_permissions",
+		},
+	}
+	
+	nodefsOpts := &nodefs.Options{}
+	
+	server, _, err := nodefs.Mount(*mountDir, fs.Root(), mountOpts, nodefsOpts)
 	if err != nil {
 		log.Fatalf("%v", err)
 	}
 
+	fmt.Printf("Mounted %s at %s with uid=%d, gid=%d\n", *backingDir, *mountDir, uid, gid)
 	server.Serve()
 }

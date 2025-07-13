@@ -144,6 +144,14 @@ func (sf *slowFile) GetAttr(out *fuse.Attr) fuse.Status {
 		return r
 	}
 
+	// Override uid/gid if specified
+	if sf.sfs.uid != 0 {
+		out.Uid = sf.sfs.uid
+	}
+	if sf.sfs.gid != 0 {
+		out.Gid = sf.sfs.gid
+	}
+
 	opTime := sf.sfs.scheduler.Schedule(&scheduler.Request{
 		Type:      scheduler.MetadataRequest,
 		Timestamp: start,
@@ -228,6 +236,8 @@ type SlowFs struct {
 	pathfs.FileSystem
 
 	scheduler *scheduler.Scheduler
+	uid       uint32
+	gid       uint32
 }
 
 // NewSlowFs creates a new SlowFs using the specified scheduler at the given directory. The
@@ -236,6 +246,18 @@ func NewSlowFs(directory string, scheduler *scheduler.Scheduler) *SlowFs {
 	return &SlowFs{
 		FileSystem: pathfs.NewLoopbackFileSystem(directory),
 		scheduler:  scheduler,
+		uid:        0,
+		gid:        0,
+	}
+}
+
+// NewSlowFsWithOwner creates a new SlowFs with specific uid/gid
+func NewSlowFsWithOwner(directory string, scheduler *scheduler.Scheduler, uid, gid uint32) *SlowFs {
+	return &SlowFs{
+		FileSystem: pathfs.NewLoopbackFileSystem(directory),
+		scheduler:  scheduler,
+		uid:        uid,
+		gid:        gid,
 	}
 }
 
@@ -270,6 +292,14 @@ func (sfs *SlowFs) GetAttr(name string, context *fuse.Context) (*fuse.Attr, fuse
 	attr, status := sfs.FileSystem.GetAttr(name, context)
 	if status != fuse.OK {
 		return attr, status
+	}
+
+	// Override uid/gid if specified
+	if sfs.uid != 0 {
+		attr.Uid = sfs.uid
+	}
+	if sfs.gid != 0 {
+		attr.Gid = sfs.gid
 	}
 
 	opTime := sfs.scheduler.Schedule(&scheduler.Request{
