@@ -16,8 +16,12 @@
 package fuselayer
 
 import (
+	"log"
+	"os"
+	"path/filepath"
 	"slowfs/slowfs/scheduler"
 	"slowfs/slowfs/units"
+	"syscall"
 	"time"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -144,11 +148,10 @@ func (sf *slowFile) GetAttr(out *fuse.Attr) fuse.Status {
 		return r
 	}
 
-	// Override uid/gid if specified
-	if sf.sfs.uid != 0 {
+	// Only override if this is the root directory (path is empty or root)
+	if (sf.path == "" || sf.path == "/") && sf.sfs.uid != 0 && sf.sfs.gid != 0 {
+		// This is the root directory, override with original ownership
 		out.Uid = sf.sfs.uid
-	}
-	if sf.sfs.gid != 0 {
 		out.Gid = sf.sfs.gid
 	}
 
@@ -238,6 +241,7 @@ type SlowFs struct {
 	scheduler *scheduler.Scheduler
 	uid       uint32
 	gid       uint32
+	rootPath  string
 }
 
 // NewSlowFs creates a new SlowFs using the specified scheduler at the given directory. The
@@ -248,6 +252,7 @@ func NewSlowFs(directory string, scheduler *scheduler.Scheduler) *SlowFs {
 		scheduler:  scheduler,
 		uid:        0,
 		gid:        0,
+		rootPath:   directory,
 	}
 }
 
@@ -258,16 +263,35 @@ func NewSlowFsWithOwner(directory string, scheduler *scheduler.Scheduler, uid, g
 		scheduler:  scheduler,
 		uid:        uid,
 		gid:        gid,
+		rootPath:   directory,
 	}
 }
 
 // Open opens a file, and then waits until the scheduled time.
 func (sfs *SlowFs) Open(name string, flags uint32, context *fuse.Context) (nodefs.File, fuse.Status) {
 	start := time.Now()
+	
+	// Check if this is a create operation
+	fileExists := true
+	if _, err := os.Stat(filepath.Join(sfs.rootPath, name)); os.IsNotExist(err) {
+		fileExists = false
+	}
+	
 	file, status := sfs.FileSystem.Open(name, flags, context)
 	// TODO(edcourtney): How long should it take in the case of an error?
 	if status != fuse.OK {
 		return file, status
+	}
+
+	// If file was created and we have context, set correct ownership
+	if !fileExists && (flags&syscall.O_CREAT != 0) && context != nil {
+		targetUid := context.Caller.Uid
+		targetGid := context.Caller.Gid
+		
+		fullPath := filepath.Join(sfs.rootPath, name)
+		if err := syscall.Chown(fullPath, int(targetUid), int(targetGid)); err != nil {
+			log.Printf("Warning: failed to set ownership of opened/created file %s: %v", fullPath, err)
+		}
 	}
 
 	slowFile := &slowFile{
@@ -294,11 +318,10 @@ func (sfs *SlowFs) GetAttr(name string, context *fuse.Context) (*fuse.Attr, fuse
 		return attr, status
 	}
 
-	// Override uid/gid if specified
-	if sfs.uid != 0 {
+	// Only override root directory uid/gid, other files should have correct ownership
+	if name == "" && sfs.uid != 0 && sfs.gid != 0 {
+		// This is the root directory, override with original ownership
 		attr.Uid = sfs.uid
-	}
-	if sfs.gid != 0 {
 		attr.Gid = sfs.gid
 	}
 
@@ -410,6 +433,17 @@ func (sfs *SlowFs) Link(oldName string, newName string, context *fuse.Context) f
 		return status
 	}
 
+	// Set correct ownership if context is available
+	if context != nil {
+		targetUid := context.Caller.Uid
+		targetGid := context.Caller.Gid
+		
+		fullPath := filepath.Join(sfs.rootPath, newName)
+		if err := syscall.Chown(fullPath, int(targetUid), int(targetGid)); err != nil {
+			log.Printf("Warning: failed to set ownership of linked file %s: %v", fullPath, err)
+		}
+	}
+
 	opTime := sfs.scheduler.Schedule(&scheduler.Request{
 		Type:      scheduler.MetadataRequest,
 		Timestamp: start,
@@ -428,6 +462,17 @@ func (sfs *SlowFs) Mkdir(name string, mode uint32, context *fuse.Context) fuse.S
 		return status
 	}
 
+	// Set correct ownership if context is available
+	if context != nil {
+		targetUid := context.Caller.Uid
+		targetGid := context.Caller.Gid
+		
+		fullPath := filepath.Join(sfs.rootPath, name)
+		if err := syscall.Chown(fullPath, int(targetUid), int(targetGid)); err != nil {
+			log.Printf("Warning: failed to set ownership of created directory %s: %v", fullPath, err)
+		}
+	}
+
 	opTime := sfs.scheduler.Schedule(&scheduler.Request{
 		Type:      scheduler.MetadataRequest,
 		Timestamp: start,
@@ -444,6 +489,17 @@ func (sfs *SlowFs) Mknod(name string, mode uint32, dev uint32, context *fuse.Con
 	status := sfs.FileSystem.Mknod(name, mode, dev, context)
 	if status != fuse.OK {
 		return status
+	}
+
+	// Set correct ownership if context is available
+	if context != nil {
+		targetUid := context.Caller.Uid
+		targetGid := context.Caller.Gid
+		
+		fullPath := filepath.Join(sfs.rootPath, name)
+		if err := syscall.Chown(fullPath, int(targetUid), int(targetGid)); err != nil {
+			log.Printf("Warning: failed to set ownership of created node %s: %v", fullPath, err)
+		}
 	}
 
 	opTime := sfs.scheduler.Schedule(&scheduler.Request{
@@ -590,6 +646,20 @@ func (sfs *SlowFs) Create(name string, flags uint32, mode uint32, context *fuse.
 		return file, status
 	}
 
+	// Set correct ownership if context is available
+	if context != nil {
+		// Use the FUSE context's uid/gid 
+		targetUid := context.Caller.Uid
+		targetGid := context.Caller.Gid
+		
+		// Construct the full path to the created file
+		fullPath := filepath.Join(sfs.rootPath, name)
+		if err := syscall.Chown(fullPath, int(targetUid), int(targetGid)); err != nil {
+			// Log the error but don't fail the operation
+			log.Printf("Warning: failed to set ownership of created file %s: %v", fullPath, err)
+		}
+	}
+
 	opTime := sfs.scheduler.Schedule(&scheduler.Request{
 		Type:      scheduler.MetadataRequest,
 		Timestamp: start,
@@ -624,6 +694,17 @@ func (sfs *SlowFs) Symlink(value string, linkName string, context *fuse.Context)
 	status := sfs.FileSystem.Symlink(value, linkName, context)
 	if status != fuse.OK {
 		return status
+	}
+
+	// Set correct ownership if context is available
+	if context != nil {
+		targetUid := context.Caller.Uid
+		targetGid := context.Caller.Gid
+		
+		fullPath := filepath.Join(sfs.rootPath, linkName)
+		if err := syscall.Lchown(fullPath, int(targetUid), int(targetGid)); err != nil {
+			log.Printf("Warning: failed to set ownership of symlink %s: %v", fullPath, err)
+		}
 	}
 
 	opTime := sfs.scheduler.Schedule(&scheduler.Request{

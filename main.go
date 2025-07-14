@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"slowfs/slowfs"
 	"slowfs/slowfs/fuselayer"
@@ -41,6 +42,92 @@ func getDirectoryOwner(dirPath string) (uint32, uint32, error) {
 	return stat.Uid, stat.Gid, nil
 }
 
+// moveToSecureLocation moves the backing directory to a secure location
+// and returns the new path
+func moveToSecureLocation(originalPath string) (string, error) {
+	// Check if we're running as root
+	if os.Geteuid() != 0 {
+		return "", fmt.Errorf("secure mode requires root privileges")
+	}
+
+	// Create secure directory if it doesn't exist
+	secureBaseDir := "/home/.slowfs"
+	if err := os.MkdirAll(secureBaseDir, 0700); err != nil {
+		return "", fmt.Errorf("failed to create secure base directory: %v", err)
+	}
+	
+	// Set ownership to root
+	if err := os.Chown(secureBaseDir, 0, 0); err != nil {
+		return "", fmt.Errorf("failed to set secure base directory ownership: %v", err)
+	}
+
+	// Generate secure path
+	baseName := filepath.Base(originalPath)
+	securePath := filepath.Join(secureBaseDir, baseName)
+	
+	// Check if secure path already exists
+	if _, err := os.Stat(securePath); err == nil {
+		return "", fmt.Errorf("secure path %s already exists", securePath)
+	}
+
+	// Move directory
+	if err := os.Rename(originalPath, securePath); err != nil {
+		return "", fmt.Errorf("failed to move directory to secure location: %v", err)
+	}
+
+	fmt.Printf("Moved backing directory from %s to %s\n", originalPath, securePath)
+	return securePath, nil
+}
+
+// restoreFromSecureLocation moves the directory back to its original location
+func restoreFromSecureLocation(securePath, originalPath string) error {
+	// Check if secure path exists
+	if _, err := os.Stat(securePath); os.IsNotExist(err) {
+		return fmt.Errorf("secure path %s does not exist", securePath)
+	}
+
+	// Check if original path already exists
+	if _, err := os.Stat(originalPath); err == nil {
+		return fmt.Errorf("original path %s already exists", originalPath)
+	}
+
+	// Move directory back
+	if err := os.Rename(securePath, originalPath); err != nil {
+		return fmt.Errorf("failed to restore directory: %v", err)
+	}
+
+	fmt.Printf("Restored backing directory from %s to %s\n", securePath, originalPath)
+	return nil
+}
+
+// cleanup handles cleanup operations when the program exits
+func cleanup(server *fuse.Server, securePath, originalPath, mountPath string, enableSecureMode bool) {
+	fmt.Println("Cleaning up...")
+	
+	// Unmount filesystem
+	if server != nil {
+		if err := server.Unmount(); err != nil {
+			log.Printf("Error unmounting filesystem: %v", err)
+		} else {
+			fmt.Println("Filesystem unmounted successfully")
+		}
+	}
+
+	// Restore directory if in secure mode
+	if enableSecureMode && securePath != "" && originalPath != "" {
+		// If mount point was the same as original path, remove the empty mount directory first
+		if originalPath == mountPath {
+			if err := os.Remove(mountPath); err != nil {
+				log.Printf("Warning: failed to remove mount point directory: %v", err)
+			}
+		}
+		
+		if err := restoreFromSecureLocation(securePath, originalPath); err != nil {
+			log.Printf("Error restoring directory: %v", err)
+		}
+	}
+}
+
 func main() {
 	configs := map[string]*slowfs.DeviceConfig{
 		slowfs.HDD7200RpmDeviceConfig.Name: &slowfs.HDD7200RpmDeviceConfig,
@@ -48,6 +135,7 @@ func main() {
 
 	backingDir := flag.String("backing-dir", "", "directory to use as storage")
 	mountDir := flag.String("mount-dir", "", "directory to mount at")
+	secureMode := flag.Bool("secure-mode", false, "enable secure mode (moves backing directory to prevent bypass)")
 
 	configFile := flag.String("config-file", "", "path to config file listing device configurations")
 	configName := flag.String("config-name", "hdd7200rpm", "which config to use (built-ins: hdd7200rpm)")
@@ -82,8 +170,10 @@ func main() {
 		log.Fatalf("invalid mount-dir: %v", err)
 	}
 
-	if *backingDir == *mountDir {
-		log.Fatalf("backing directory may not be the same as mount directory.")
+	// In secure mode, we allow backing-dir and mount-dir to be the same
+	// because we'll move the backing directory to a secure location
+	if *backingDir == *mountDir && !*secureMode {
+		log.Fatalf("backing directory may not be the same as mount directory (unless using --secure-mode)")
 	}
 
 	if *configFile != "" {
@@ -194,6 +284,33 @@ func main() {
 
 	fmt.Printf("using config: %s\n", config)
 	
+	// Store original backing directory path for cleanup
+	originalBackingDir := *backingDir
+	var secureBackingDir string
+	
+	// Handle secure mode
+	if *secureMode {
+		fmt.Println("Secure mode enabled")
+		secureBackingDir, err = moveToSecureLocation(*backingDir)
+		if err != nil {
+			log.Fatalf("failed to move directory to secure location: %v", err)
+		}
+		
+		// If mount-dir and original backing-dir were the same, we need to create the mount point
+		if originalBackingDir == *mountDir {
+			if err := os.MkdirAll(*mountDir, 0755); err != nil {
+				// Try to restore on error
+				if restoreErr := restoreFromSecureLocation(secureBackingDir, originalBackingDir); restoreErr != nil {
+					log.Printf("Failed to restore directory after mkdir error: %v", restoreErr)
+				}
+				log.Fatalf("failed to create mount point directory: %v", err)
+			}
+			fmt.Printf("Created mount point directory: %s\n", *mountDir)
+		}
+		
+		*backingDir = secureBackingDir
+	}
+	
 	// Get the owner of the backing directory
 	uid, gid, err := getDirectoryOwner(*backingDir)
 	if err != nil {
@@ -216,9 +333,31 @@ func main() {
 	
 	server, _, err := nodefs.Mount(*mountDir, fs.Root(), mountOpts, nodefsOpts)
 	if err != nil {
+		// If mount fails and we're in secure mode, restore the directory
+		if *secureMode && secureBackingDir != "" {
+			if restoreErr := restoreFromSecureLocation(secureBackingDir, originalBackingDir); restoreErr != nil {
+				log.Printf("Failed to restore directory after mount error: %v", restoreErr)
+			}
+		}
 		log.Fatalf("%v", err)
 	}
 
 	fmt.Printf("Mounted %s at %s with uid=%d, gid=%d\n", *backingDir, *mountDir, uid, gid)
+	
+	// Set up signal handling for graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	
+	// Handle cleanup in a separate goroutine
+	go func() {
+		<-sigChan
+		cleanup(server, secureBackingDir, originalBackingDir, *mountDir, *secureMode)
+		os.Exit(0)
+	}()
+	
+	// Serve the filesystem
 	server.Serve()
+	
+	// If we reach here, server.Serve() returned, so clean up
+	cleanup(server, secureBackingDir, originalBackingDir, *mountDir, *secureMode)
 }
