@@ -1,0 +1,14 @@
+[
+  {
+    "Name": "ideal50mb",
+    "SeekWindow": "1MiB",
+    "SeekTime": "10us",
+    "ReadBytesPerSecond": "50MB",
+    "WriteBytesPerSecond": "50MB",
+    "AllocateBytesPerSecond": "10GiB",
+    "RequestReorderMaxDelay": "1us",
+    "FsyncStrategy": "none",
+    "WriteStrategy": "simulate",
+    "MetadataOpTime": "1us"
+  }
+]
