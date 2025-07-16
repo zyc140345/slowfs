@@ -42,6 +42,10 @@ func (sf *slowFile) Read(dest []byte, off int64) (fuse.ReadResult, fuse.Status) 
 	r, status := sf.File.Read(dest, off)
 	// TODO(edcourtney): How long should it take in the case of an error?
 	if status != fuse.OK {
+		if sf.sfs.verboseLog {
+			log.Printf("ERROR: Read failed for file=%s offset=%d size=%d status=%s", 
+				sf.path, off, len(dest), status)
+		}
 		return r, status
 	}
 
@@ -76,6 +80,10 @@ func (sf *slowFile) Write(data []byte, off int64) (uint32, fuse.Status) {
 
 	// TODO(edcourtney): How long should it take in the case of an error?
 	if status != fuse.OK {
+		if sf.sfs.verboseLog {
+			log.Printf("ERROR: Write failed for file=%s offset=%d size=%d status=%s", 
+				sf.path, off, len(data), status)
+		}
 		return r, status
 	}
 
@@ -238,10 +246,11 @@ func (sf *slowFile) Allocate(off uint64, size uint64, mode uint32) fuse.Status {
 type SlowFs struct {
 	pathfs.FileSystem
 
-	scheduler *scheduler.Scheduler
-	uid       uint32
-	gid       uint32
-	rootPath  string
+	scheduler  *scheduler.Scheduler
+	uid        uint32
+	gid        uint32
+	rootPath   string
+	verboseLog bool
 }
 
 // NewSlowFs creates a new SlowFs using the specified scheduler at the given directory. The
@@ -257,19 +266,26 @@ func NewSlowFs(directory string, scheduler *scheduler.Scheduler) *SlowFs {
 }
 
 // NewSlowFsWithOwner creates a new SlowFs with specific uid/gid
-func NewSlowFsWithOwner(directory string, scheduler *scheduler.Scheduler, uid, gid uint32) *SlowFs {
+func NewSlowFsWithOwner(directory string, scheduler *scheduler.Scheduler, uid, gid uint32, verboseLog bool) *SlowFs {
 	return &SlowFs{
 		FileSystem: pathfs.NewLoopbackFileSystem(directory),
 		scheduler:  scheduler,
 		uid:        uid,
 		gid:        gid,
 		rootPath:   directory,
+		verboseLog: verboseLog,
 	}
 }
 
 // Open opens a file, and then waits until the scheduled time.
 func (sfs *SlowFs) Open(name string, flags uint32, context *fuse.Context) (nodefs.File, fuse.Status) {
 	start := time.Now()
+	
+	// Log file access with user context (only in verbose mode)
+	if sfs.verboseLog && context != nil {
+		log.Printf("OPEN: uid=%d gid=%d file=%s flags=0x%x", 
+			context.Caller.Uid, context.Caller.Gid, name, flags)
+	}
 	
 	// Check if this is a create operation
 	fileExists := true
@@ -280,6 +296,10 @@ func (sfs *SlowFs) Open(name string, flags uint32, context *fuse.Context) (nodef
 	file, status := sfs.FileSystem.Open(name, flags, context)
 	// TODO(edcourtney): How long should it take in the case of an error?
 	if status != fuse.OK {
+		if sfs.verboseLog && context != nil {
+			log.Printf("ERROR: Open failed for uid=%d file=%s status=%s", 
+				context.Caller.Uid, name, status)
+		}
 		return file, status
 	}
 
@@ -459,6 +479,10 @@ func (sfs *SlowFs) Mkdir(name string, mode uint32, context *fuse.Context) fuse.S
 	start := time.Now()
 	status := sfs.FileSystem.Mkdir(name, mode, context)
 	if status != fuse.OK {
+		if context != nil {
+			log.Printf("ERROR: Mkdir failed for uid=%d dir=%s status=%s", 
+				context.Caller.Uid, name, status)
+		}
 		return status
 	}
 
@@ -553,6 +577,10 @@ func (sfs *SlowFs) Unlink(name string, context *fuse.Context) fuse.Status {
 	start := time.Now()
 	status := sfs.FileSystem.Unlink(name, context)
 	if status != fuse.OK {
+		if context != nil {
+			log.Printf("ERROR: Unlink failed for uid=%d file=%s status=%s", 
+				context.Caller.Uid, name, status)
+		}
 		return status
 	}
 
@@ -643,6 +671,10 @@ func (sfs *SlowFs) Create(name string, flags uint32, mode uint32, context *fuse.
 	start := time.Now()
 	file, status := sfs.FileSystem.Create(name, flags, mode, context)
 	if status != fuse.OK {
+		if context != nil {
+			log.Printf("ERROR: Create failed for uid=%d file=%s status=%s", 
+				context.Caller.Uid, name, status)
+		}
 		return file, status
 	}
 

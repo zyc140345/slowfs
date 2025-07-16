@@ -42,6 +42,14 @@ type deviceContext struct {
 	busyUntil time.Time
 
 	logger *log.Logger
+	verboseLog bool
+	
+	// Statistics for periodic logging (30-second window)
+	windowReadBytes  uint64
+	windowWriteBytes uint64
+	windowReads      uint64
+	windowWrites     uint64
+	lastLogTime      time.Time
 
 	// Holds information about data not yet written back to disk.
 	writeBackCache *writeBackCache
@@ -56,8 +64,9 @@ func newDeviceContext(config *slowfs.DeviceConfig) *deviceContext {
 	}
 	return &deviceContext{
 		deviceConfig:   config,
-		logger:         log.New(os.Stderr, "DeviceContext: ", log.Ldate|log.Ltime|log.Lshortfile),
+		logger:         log.New(os.Stderr, "SlowFS: ", log.Ldate|log.Ltime),
 		writeBackCache: writeBackCache,
+		lastLogTime:    time.Now(),
 	}
 }
 
@@ -99,6 +108,36 @@ func (dc *deviceContext) computeTime(req *Request) time.Duration {
 // Execute executes a given request, applying changes to the device context.
 func (dc *deviceContext) execute(req *Request) {
 	spareTime := req.Timestamp.Sub(dc.busyUntil)
+	
+	// Update statistics for current window
+	switch req.Type {
+	case ReadRequest:
+		dc.windowReads++
+		dc.windowReadBytes += uint64(req.Size)
+	case WriteRequest:
+		dc.windowWrites++
+		dc.windowWriteBytes += uint64(req.Size)
+	}
+	
+	// Log statistics every 30 seconds and reset window
+	if time.Since(dc.lastLogTime) > 30*time.Second {
+		if dc.windowReads > 0 || dc.windowWrites > 0 {
+			// Calculate average speeds in KB/s over the 30-second window
+			windowDuration := time.Since(dc.lastLogTime).Seconds()
+			readKBps := float64(dc.windowReadBytes) / 1024 / windowDuration
+			writeKBps := float64(dc.windowWriteBytes) / 1024 / windowDuration
+			
+			dc.logger.Printf("IO Speed: %.1f KB/s read (%d ops), %.1f KB/s write (%d ops)",
+				readKBps, dc.windowReads, writeKBps, dc.windowWrites)
+		}
+		
+		// Reset window counters
+		dc.windowReads = 0
+		dc.windowWrites = 0
+		dc.windowReadBytes = 0
+		dc.windowWriteBytes = 0
+		dc.lastLogTime = time.Now()
+	}
 
 	// Devote spare time to writing back cache.
 	if spareTime > 0 && dc.writeBackCache != nil {

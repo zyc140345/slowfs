@@ -33,6 +33,28 @@ const (
 	MetadataRequest
 )
 
+// String returns the string representation of RequestType
+func (rt RequestType) String() string {
+	switch rt {
+	case ReadRequest:
+		return "READ"
+	case WriteRequest:
+		return "WRITE"
+	case OpenRequest:
+		return "OPEN"
+	case CloseRequest:
+		return "CLOSE"
+	case FsyncRequest:
+		return "FSYNC"
+	case AllocateRequest:
+		return "ALLOCATE"
+	case MetadataRequest:
+		return "METADATA"
+	default:
+		return "UNKNOWN"
+	}
+}
+
 // Request contains information for all types of requests.
 type Request struct {
 	Type      RequestType

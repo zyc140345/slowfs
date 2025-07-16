@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"slowfs/slowfs"
@@ -100,14 +101,45 @@ func restoreFromSecureLocation(securePath, originalPath string) error {
 	return nil
 }
 
+// forceUnmount attempts to forcefully unmount by killing processes using the mount point
+func forceUnmount(mountPath string) error {
+	fmt.Printf("Attempting to force unmount %s by killing processes...\n", mountPath)
+	
+	// First try to kill processes using fuser
+	cmd := exec.Command("fuser", "-km", mountPath)
+	if err := cmd.Run(); err != nil {
+		log.Printf("fuser command failed: %v", err)
+	}
+	
+	// Wait a moment for processes to terminate
+	time.Sleep(2 * time.Second)
+	
+	// Try lazy unmount as last resort
+	cmd = exec.Command("umount", "-l", mountPath)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("lazy unmount failed: %v", err)
+	}
+	
+	fmt.Printf("Successfully force unmounted %s\n", mountPath)
+	return nil
+}
+
 // cleanup handles cleanup operations when the program exits
 func cleanup(server *fuse.Server, securePath, originalPath, mountPath string, enableSecureMode bool) {
 	fmt.Println("Cleaning up...")
 	
-	// Unmount filesystem
+	// Unmount filesystem with retry mechanism
 	if server != nil {
-		if err := server.Unmount(); err != nil {
-			log.Printf("Error unmounting filesystem: %v", err)
+		err := server.Unmount()
+		if err != nil {
+			log.Printf("Normal unmount failed: %v", err)
+			
+			// Try force unmount
+			if forceErr := forceUnmount(mountPath); forceErr != nil {
+				log.Printf("ERROR: Force unmount also failed: %v", forceErr)
+			} else {
+				log.Printf("Filesystem forcefully unmounted")
+			}
 		} else {
 			fmt.Println("Filesystem unmounted successfully")
 		}
@@ -139,6 +171,7 @@ func main() {
 
 	configFile := flag.String("config-file", "", "path to config file listing device configurations")
 	configName := flag.String("config-name", "hdd7200rpm", "which config to use (built-ins: hdd7200rpm)")
+	verboseLog := flag.Bool("verbose", false, "enable verbose logging for debugging")
 
 	// Flags for overriding any subset of the config. These are all strings (even the durations)
 	// because we need to differentiate between the flag not being specified, and being set to the
@@ -319,7 +352,7 @@ func main() {
 	fmt.Printf("Detected backing directory owner: uid=%d, gid=%d\n", uid, gid)
 	
 	scheduler := scheduler.New(config)
-	fs := pathfs.NewPathNodeFs(fuselayer.NewSlowFsWithOwner(*backingDir, scheduler, uid, gid), nil)
+	fs := pathfs.NewPathNodeFs(fuselayer.NewSlowFsWithOwner(*backingDir, scheduler, uid, gid, *verboseLog), nil)
 	
 	// Create mount options with proper uid/gid mapping
 	mountOpts := &fuse.MountOptions{
@@ -343,6 +376,7 @@ func main() {
 	}
 
 	fmt.Printf("Mounted %s at %s with uid=%d, gid=%d\n", *backingDir, *mountDir, uid, gid)
+	log.Printf("SlowFS started: backing=%s mount=%s config=%s secure=%v", *backingDir, *mountDir, *configName, *secureMode)
 	
 	// Set up signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
@@ -350,8 +384,10 @@ func main() {
 	
 	// Handle cleanup in a separate goroutine
 	go func() {
-		<-sigChan
+		sig := <-sigChan
+		log.Printf("Received signal %v, initiating shutdown...", sig)
 		cleanup(server, secureBackingDir, originalBackingDir, *mountDir, *secureMode)
+		log.Printf("SlowFS shutdown completed")
 		os.Exit(0)
 	}()
 	
